@@ -9,9 +9,6 @@ library(lubridate)
 library(forecast)
 library(glue)
 # notes -------------------------------------------------------------------
-
-
-
 #### markets to look at: 
 # 538 approval rating (historical from github)
 # tweets
@@ -45,7 +42,61 @@ prophet_df <- toplines %>%
 #trump$statuses_count # check this matches the basic rules for their page
 # model function ----------------------------------------------------------
 
-# INSERT HERE FOR TESTING AND FINAL FOR APPROVAL RATINGS
+approval_forecast <- function(prophet_df) {
+  
+  ### PROPHET SECTIN
+  m <- prophet(prophet_df)
+  future <- make_future_dataframe(m, periods = 7)
+  forecast <- predict(m, future)
+  
+  # looking at fit and results
+  prophet_preds <- forecast %>% 
+    as_tibble() %>% 
+    left_join(prophet_df %>% mutate(ds = ds %>% as_datetime()), by = 'ds') %>% 
+    arrange(ds %>% desc) %>% select(ds, yhat, y, yhat_lower, yhat_upper) 
+  
+  
+  ### ARIMA SECTION
+  
+  n_ahead = 7
+  
+  fit <- auto.arima(prophet_df$y)
+  #preds <- predict(fit, n.ahead = 7)
+  preds <- forecast(fit, h = 7)
+  actuals <- c(rep(NA, n_ahead), prophet_df$y)
+  
+  preds_with_future <- c(fit$fitted, preds$mean)
+  
+  ### COMBO SECTION
+  
+  step = prophet_preds %>% filter(is.na(y) == F)
+  
+  errors <- step$yhat - step$y
+  
+  arima_errors <- auto.arima(errors)
+  
+  ae_fit <- predict(arima_errors, n.ahead = n_ahead)
+  
+  ae_preds <- c(arima_errors$fitted, ae_fit$pred)
+  
+  ## RESULTS SECTION
+  
+  results_table <- prophet_preds %>% 
+    as_tibble() %>% 
+    arrange(ds %>% desc) %>% 
+    select(ds, prophet_preds = yhat) %>% 
+    mutate(y = actuals,
+           arima_preds = preds_with_future,
+           #ets_preds = ets_preds,
+           combo_preds = prophet_preds - ae_preds,
+           lag_preds = y[ds == max(ds[y %>% is.na == F])]) %>% 
+    filter(row_number() <= 7)
+  
+  print('done')
+          
+  return(results_table)
+  
+}
 
 # prophet -----------------------------------------------------------------
 
@@ -92,6 +143,7 @@ ae_fit <- predict(arima_errors, n.ahead = n_ahead)
 ae_preds <- c(arima_errors$fitted, ae_fit$pred)
 
 
+arima_errors
 
 # ETS ---------------------------------------------------------------------
 
@@ -152,26 +204,84 @@ results_table %>%
 ## now, need to test a week out for everything at random points
 
 
-# uncertainty note --------------------------------------------------------
+# cross validation --------------------------------------------------------
+## to do here: use this to get average errors for the prophet, arima, and simple models at various timeframes. Use that to decide 1) which is best, and 2) find an estimate for the uncertainty. After that, see which is best, and decide whether or not the market behaves rationally!
 
-## take "how often is prediction from 0-7 days ago wrong" to generate distribution of how much it changes. Also can do the same for the other models to generate confidence intervals. 
-
-## do cross validation here with each of the models and errors. 
-
-
-# cross validation starter --------------------------------------------------------
-
-starts <- seq(ymd('20170601'), ymd('20200227'), by = '1 days')
+starts <- seq(ymd('20170601'), ymd('20200310'), by = '1 days')
 
 sampler <- tibble(starts = starts,
                   ends = starts %m+% days(7))
 
-to_test <- sampler %>% 
-  sample_n(5)
+to_test <- sampler %>% sample_n(400)
 
-## to do here: use this to get average errors for the prophet, arima, and simple models at various timeframes. Use that to decide 1) which is best, and 2) find an estimate for the uncertainty. After that, see which is best, and decide whether or not predictit behaves rationally!
+build_test_df <- function(date) {
+  prophet_df %>% 
+    filter(ds <= date)
+}
 
-# simple model: ----------------------------------------------------------
+enhance_preds <- function(df) {
+  df %>% 
+    inner_join(prophet_df %>% 
+                 mutate(ds = as_datetime(ds)) %>% 
+                 select(ds, actual = y)) %>% 
+    mutate(y = coalesce(y, actual)) %>% 
+    arrange(ds) %>% 
+    select(-actual) %>% 
+    mutate(arima_error = arima_preds - y,
+           prophet_error = prophet_preds - y,
+           combo_error = combo_preds - y,
+           lag_error = lag_preds - y,
+           sample = min(ds),
+           rn = row_number()) 
+}
+
+## testing every date- save this one cody
+
+tt <- starts %>% #to_test$starts %>% 
+  map(build_test_df) %>% 
+  map(approval_forecast) %>% 
+  map(enhance_preds)
+
+tt %>% bind_rows() %>%  write_csv('/Users/codycrunkilton/Dropbox/personal_github/predictit/data/approval_ratings_testing.csv')
+
+tt %>% 
+  bind_rows() %>% 
+  group_by(rn) %>% 
+  summarise_at(c('arima_error', 'prophet_error', 'combo_error', 'lag_error'), function(x) {mean(abs(x))})
+
+## looks like taking the value at n-1 is more accurate than anything else!
+## and, ARIMA beats prophet and combo. 
+
+## is there any variance over time? Doesn't look like it
+tt %>% 
+  bind_rows() %>% 
+  mutate(month = floor_date(sample, 'months')) %>% 
+  group_by(month) %>% 
+  summarise_at(c('arima_error', 'prophet_error', 'combo_error', 'lag_error'), function(x) {mean(abs(x))}) %>% 
+  pivot_longer(names_to = 'error', values_to = 'values', -c(month)) %>% 
+  ggplot(aes(x = month, y = values)) + 
+  geom_col() +
+  facet_wrap(~error)
+
+## win percent:
+tt %>% 
+  bind_rows() %>% 
+  select(ds, sample, rn, arima_error:lag_error) %>% 
+  pivot_longer(names_to = 'error', values_to = 'values', -c(ds, sample, rn)) %>% 
+  group_by(sample, ds) %>% 
+  arrange(abs(values)) %>% 
+  filter(row_number() == 1) %>% 
+  group_by(error) %>% 
+  summarise(n_wins = n()) %>% 
+  arrange(n_wins) %>% 
+  mutate(win_pct = 100 * n_wins/sum(n_wins))
+
+## looks like the simple lag model is the best almost 50% of the time - the others are fairly evenly split, but arima > combo > prophet
+
+## making a graph:
+
+
+# The simple model, which won: ----------------------------------------------------------
 
 lag_model <- prophet_df %>% 
   mutate(lag1 = lead(y, 1),
@@ -181,11 +291,10 @@ lag_model <- prophet_df %>%
          lag5 = lead(y, 5),
          lag6 = lead(y, 6),
          lag7 = lead(y, 7),
-         blend = ma(lead(y, 10), 7) %>% as.numeric()) %>% 
+         #blend = ma(lead(y, 10), 7 %>% as.numeric()
+         ) %>% 
   pivot_longer(names_to = 'lag', values_to = 'pred', -c(ds, y)) %>% 
   mutate(error = pred - y)
-
-lag_model
 
 lag_model %>% 
   group_by(lag) %>% 
@@ -213,19 +322,24 @@ lag_model %>%
 
 lag_limited <- lag_model %>% filter(ds > min(ds) %m+% months(2))
 
-lag_errors <- lag_limited %>% 
+lag_small <- lag_limited %>% 
   group_by(lag) %>% 
   summarise(sd = sd(error, na.rm = T))
 
-lag_big_swing <- lag_model %>% 
+lag_all <- lag_model %>% 
   group_by(lag) %>% 
   summarise(sd = sd(error, na.rm = T))
 
 ## predicting 3/5:
-lag_errors
-lag_big_swing
+lag_small
+lag_all
 
-prophet_df
+new_dates <- seq(max(prophet_df$ds) %m+% days(1), max(prophet_df$ds) %m+% days(7), by = '1 days')
+
+tibble(ds = new_dates, 
+       y = prophet_df$y[prophet_df$ds == max(prophet_df$ds)],
+       small_sd = lag_small$sd, 
+       sd = lag_all$sd)
 
 ## get cutpoints predictit uses, predict those values
 
@@ -235,7 +349,7 @@ cutpoints <- seq(41.5, 43.5, by = .4) # from lowest to second highest
 
 ## remember they will round, fix that later
 prophet_df
-sd_dev = .365
+sd_dev = .232
 current_price = prophet_df$y[1]
 current_price
 
