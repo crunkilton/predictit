@@ -42,13 +42,7 @@ prophet_df <- toplines %>%
          ds = mdy(modeldate)) %>% 
   select(ds, y)
 
-trump$statuses_count # check this matches the basic rules for their page
-
-djt <- get_timeline("realDonaldTrump", n = 3200)
-
-trump <- lookup_users('realDonaldTrump')
-
-trump$statuses_count # check this matches the basic rules for their page
+#trump$statuses_count # check this matches the basic rules for their page
 # model function ----------------------------------------------------------
 
 # INSERT HERE FOR TESTING AND FINAL FOR APPROVAL RATINGS
@@ -175,6 +169,7 @@ sampler <- tibble(starts = starts,
 to_test <- sampler %>% 
   sample_n(5)
 
+## to do here: use this to get average errors for the prophet, arima, and simple models at various timeframes. Use that to decide 1) which is best, and 2) find an estimate for the uncertainty. After that, see which is best, and decide whether or not predictit behaves rationally!
 
 # simple model: ----------------------------------------------------------
 
@@ -222,8 +217,13 @@ lag_errors <- lag_limited %>%
   group_by(lag) %>% 
   summarise(sd = sd(error, na.rm = T))
 
+lag_big_swing <- lag_model %>% 
+  group_by(lag) %>% 
+  summarise(sd = sd(error, na.rm = T))
+
 ## predicting 3/5:
 lag_errors
+lag_big_swing
 
 prophet_df
 
@@ -231,39 +231,30 @@ prophet_df
 
 ## pretend that cutpoints are by .3 increments from 41.5 to 45.5
 ## (pull this from predictit API then do this step):
-cutpoints <- seq(41.5, 45.5, by = .3)
-cutpoints
+cutpoints <- seq(41.5, 43.5, by = .4) # from lowest to second highest
 
-round(42.5)
 ## remember they will round, fix that later
 prophet_df
-sd_dev = .64
+sd_dev = .365
 current_price = prophet_df$y[1]
 current_price
 
-tibble(lower = cutpoints, 
-       upper = cutpoints + .3,
-       lw = lower - .05,
-       up = upper - .05,
+simple_model <- tibble(lower = cutpoints, 
+       upper = cutpoints + .4,
+  ) %>% 
+  bind_rows(tibble(lower = c(0, max(cutpoints)), upper = c(min(cutpoints), 100)) )%>% 
+  mutate(lw = lower - .05,
+         up = upper - .05,
        prob = ((pnorm(up-current_price, sd = sd_dev, lower.tail = T) - pnorm(lw-current_price, sd = sd_dev, lower.tail = T)) * 100) %>% round(1),
        real_upper = upper - .1 # doing this to make them match predictit's format
        ) %>% 
+  arrange(lower, upper) %>% 
   select(lower, upper = real_upper, prob)
 
-signif(44.75, 3)
+simple_model
 
-upper = 43.5
-lower = 43.2
-pnorm(upper-current_price, sd = sd_dev, lower.tail = T) - pnorm(lower-current_price, sd = sd_dev, lower.tail = T)
-
-pnorm(.2, mean = 0, sd = .232) - pnorm(0, mean = 0, sd = .232, lower.tail = F)
-
-pnorm(-.3, mean = 0, sd = .232, lower.tail = F) 
-
-results_table %>% 
-  mutate()
-
-lag_model
+simple_model %>% 
+  mutate(predicit_probs)
 
 # unsorted ----------------------------------------------------------------
 
