@@ -341,6 +341,8 @@ tibble(ds = new_dates,
        small_sd = lag_small$sd, 
        sd = lag_all$sd)
 
+## to do: get function that takes target date, predictit cutoffs, and estimates the probabilities for each under both the big_sd and small_sd segments. Or, do that in python and have this end here. (Or, move everything to python- this is all simple)
+
 ## get cutpoints predictit uses, predict those values
 
 ## pretend that cutpoints are by .3 increments from 41.5 to 45.5
