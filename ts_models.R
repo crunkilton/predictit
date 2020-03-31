@@ -330,6 +330,12 @@ lag_all <- lag_model %>%
   group_by(lag) %>% 
   summarise(sd = sd(error, na.rm = T))
 
+lag_all
+
+lag_model$error %>% sd(na.rm = T)
+
+lag_model$error %>% mean(na.rm = T)
+
 ## predicting 3/5:
 lag_small
 lag_all
@@ -347,7 +353,7 @@ tibble(ds = new_dates,
 
 ## pretend that cutpoints are by .3 increments from 41.5 to 45.5
 ## (pull this from predictit API then do this step):
-cutpoints <- seq(41.5, 43.5, by = .4) # from lowest to second highest
+cutpoints <- seq(43.4, 45.8, by = .4) # from lowest to second highest
 
 ## remember they will round, fix that later
 prophet_df
@@ -371,6 +377,8 @@ simple_model
 
 simple_model %>% 
   mutate(predicit_probs)
+
+pnorm(45.8, mean = 45.5, sd = .269, lower.tail = T)
 
 # unsorted ----------------------------------------------------------------
 
