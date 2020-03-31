@@ -34,6 +34,8 @@ import numpy as np
 import requests
 import json
 import datetime
+import scipy.stats
+
 
 class odds_calc():
     def __init__(self, odds, withdrawal_tax = False):
@@ -80,7 +82,6 @@ class odds_calc():
 # odds_calc(odds = .93, withdrawal_tax=True).real_odds()
 # odds_calc(odds = [.42, .50, .97], withdrawal_tax=False).ror_arbitrage()
 
-
 ### API HERE
 
 def pull_predict_it(): 
@@ -97,6 +98,8 @@ def pull_predict_it():
 
     df = full_df
     return(df)
+
+predictit_df = pull_predict_it()
 
 class predictIt():
 
@@ -180,9 +183,34 @@ class predictIt():
 
         return(paired_df)
 
-df = pull_predict_it()
+    def gen_538_cost_df(self):
+        df = self.df 
+        
+        ar = df[df['contract_name'].str.contains("Trump's 538 job")]
+        if len(ar['contract_id'].unique()) == 1:
+            r = ar['name'].str.replace('\%', '').str.replace(' to ', ',').str.replace(' or lower', '').str.replace(' or higher', '')
+            r[0] = '00.0,' + r[0]
+            r[len(r)-1] = r[len(r)-1] + ',100'
 
-predictIt(df).arbitrage_roi()
+            low_bounds = r.apply(lambda x: x[:4]).astype(float)
+            high_bounds = r.apply(lambda x: x[5:]).astype(float)
+
+            cost_df = ar[['bestBuyYesCost', 'bestBuyNoCost', 'dateEnd']]
+            cost_df['lower'] = low_bounds
+            cost_df['upper'] = high_bounds
+
+            cost_df['real_yes_cost'] = cost_df['bestBuyYesCost'].apply(lambda x: odds_calc(x).real_odds())
+
+            cost_df['real_no_cost'] = cost_df['bestBuyNoCost'].apply(lambda x: odds_calc(x).real_odds())
+
+            return(cost_df)
+        else:
+            print('multiple possible markets:')
+            print(ar['contract_id'].unique())
+            print(ar['contract_name'].unique())
+
+
+predictIt(predictit_df).arbitrage_roi()
 
 
 paired_outcomes = {'ia_nh_pair':[14214, 19366],
@@ -205,7 +233,7 @@ paired_outcomes = {'ia_nh_pair':[14214, 19366],
 # biden prez = 7940
 # biden nom = 7729
 
-predictIt(df).paired_outcome_arbitrage(paired_outcomes)
+predictIt(predictit_df).paired_outcome_arbitrage(paired_outcomes)
 
 
 def list_contests(df):
@@ -216,10 +244,94 @@ def list_contests(df):
     for row in range(len(uqs)):
         print(uqs['contract_id'][row], uqs['contract_name'][row])
 
-list_contests(df[df['contract_name'].str.contains('House')])
+list_contests(df[df['contract_name'].str.contains("Trump's 538 job")])
 #4353
 #4365
 #4366
+
+
+######## TRUMP 538 APPROVAL RATING HERE ##########
+## calculate averages historically:
+
+def pull_538_approval():
+    ar_data = pd.read_csv("https://projects.fivethirtyeight.com/trump-approval-data/approval_topline.csv")
+    ar_data = ar_data[ar_data['subgroup'] == 'All polls']
+    ar_data['ds'] = pd.to_datetime(ar_data['modeldate'], format = "%m/%d/%Y")
+    ar_data['y'] = ar_data['approve_estimate']
+    ar_data = ar_data[['ds', 'y', 'timestamp']].reset_index(drop = True)
+
+    return(ar_data)
+
+ar_538 = pull_538_approval()
+
+class approval_538():
+
+    def __init__(self, df):
+
+        df['lag1'] = df['y'].shift(-1)
+        df['lag2'] = df['y'].shift(-2)
+        df['lag3'] = df['y'].shift(-3)
+        df['lag4'] = df['y'].shift(-4)
+        df['lag5'] = df['y'].shift(-5)
+        df['lag6'] = df['y'].shift(-6)
+        df['lag7'] = df['y'].shift(-7)
+
+        ndf = pd.melt(df, id_vars = ['ds', 'y', 'timestamp'], var_name = 'lag', value_name='pred')
+        ndf['error'] = ndf['y'] - ndf['pred']
+
+
+        st_devs = ndf.drop(['y', 'pred'], axis = 1).groupby('lag').std(ddof = 1)
+
+        self.df = df
+        self.ndf = ndf
+        self.st_devs = st_devs
+        self.cost_df = predictIt(predictit_df).gen_538_cost_df()
+
+    @staticmethod
+    def cdf_probs(dist, lower, upper):
+        prob = dist.cdf(upper) - dist.cdf(lower)
+        return(prob)
+    
+    def cost_probs(self):
+        ar_data = self.df
+        st_devs = self.st_devs
+        cost_df = self.cost_df
+
+        end_date = cost_df['dateEnd'].unique()
+        end_date = pd.to_datetime(end_date[0]).date()
+        current_date = ar_data['ds'].iloc[0].date()
+
+        days_off = end_date - current_date
+        datediff_index = days_off.days - 1
+
+        sd_to_use = st_devs.iloc[datediff_index]
+        most_recent_ar = ar_data['y'][0]
+
+        dist = scipy.stats.norm(most_recent_ar, sd_to_use)
+
+        cost_df['actual_lower'] = cost_df['lower'] - .05
+        cost_df['actual_upper'] = cost_df['upper'] + .05
+
+        cost_df['prob'] = cdf_probs(dist, lower = cost_df['actual_lower'], upper = cost_df['actual_upper'])
+
+        #cost_df['prob'].apply(lambda x: round(x, 4))
+
+        cd = cost_df.drop(['actual_lower', 'actual_upper', 'dateEnd'], axis = 1)
+        cd['yes_margin'] = cd['prob'] - cd['real_yes_cost']
+        cd['no_margin'] = (1-cd['prob']) - cd['real_no_cost']
+        cd['prob'] = round(cd['prob'], 4)
+        cd = cd[['lower', 'upper', 'prob', 'bestBuyYesCost', 'bestBuyNoCost', 'yes_margin', 'no_margin']]
+
+        hours_since_update = round((datetime.datetime.now() - pd.to_datetime(ar_data['timestamp'][0])).seconds / (60*60), 1)
+
+        print(str(days_off.days) + ' days out, last update posted ' + str(hours_since_update) + ' hours ago at '+ ar_data['timestamp'][0])
+
+        return(cd)
+
+approval_538(ar_538).cost_probs()
+
+# not 44.6-44.9 and yes to the higher ones seem to be the value bets for 4/1. Who knows previously
+
 
 
  ####### BALANCE OF POWER IN GOV WORKING HERE #######
