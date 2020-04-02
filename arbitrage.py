@@ -129,6 +129,7 @@ class predictIt():
         return(targets)
     
     def arbitrage_roi(self):
+        df = self.df
         arb_possibles = predictIt(df).arbitrage_possibles(withdrawal_tax = False, all_profitable = True)
 
         contracts = arb_possibles.index.get_level_values('contract_id').tolist()
@@ -286,6 +287,7 @@ class approval_538():
         self.ndf = ndf
         self.st_devs = st_devs
         self.cost_df = predictIt(predictit_df).gen_538_cost_df()
+        self.most_recent_ar = df['y'][0]
 
     @staticmethod
     def cdf_probs(dist, lower, upper):
@@ -296,6 +298,7 @@ class approval_538():
         ar_data = self.df
         st_devs = self.st_devs
         cost_df = self.cost_df
+        most_recent_ar = self.most_recent_ar
 
         end_date = cost_df['dateEnd'].unique()
         end_date = pd.to_datetime(end_date[0]).date()
@@ -305,14 +308,13 @@ class approval_538():
         datediff_index = days_off.days - 1
 
         sd_to_use = st_devs.iloc[datediff_index]
-        most_recent_ar = ar_data['y'][0]
-
+        
         dist = scipy.stats.norm(most_recent_ar, sd_to_use)
 
         cost_df['actual_lower'] = cost_df['lower'] - .05
         cost_df['actual_upper'] = cost_df['upper'] + .05
 
-        cost_df['prob'] = cdf_probs(dist, lower = cost_df['actual_lower'], upper = cost_df['actual_upper'])
+        cost_df['prob'] = self.cdf_probs(dist, lower = cost_df['actual_lower'], upper = cost_df['actual_upper'])
 
         #cost_df['prob'].apply(lambda x: round(x, 4))
 
@@ -324,11 +326,16 @@ class approval_538():
 
         hours_since_update = round((datetime.datetime.now() - pd.to_datetime(ar_data['timestamp'][0])).seconds / (60*60), 1)
 
-        print(str(days_off.days) + ' days out, last update posted ' + str(hours_since_update) + ' hours ago at '+ ar_data['timestamp'][0])
+        print(str(days_off.days) + ' days out, current rating is ' + str(round(most_recent_ar, 2)) + ', last update posted ' + str(hours_since_update) + ' hours ago at '+ ar_data['timestamp'][0])
 
         return(cd)
 
 approval_538(ar_538).cost_probs()
+
+## 4/2/2020: buy yes 45.6-9 at 18
+## buy no 46.8 and 47.2+ at 90
+
+
 
 # not 44.6-44.9 and yes to the higher ones seem to be the value bets for 4/1. Who knows previously
 
