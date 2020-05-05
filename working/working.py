@@ -8,7 +8,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit
 
-
 ## a quick look
 model = LinearRegression()#RandomForestRegressor()
 df = df.dropna()
@@ -22,15 +21,122 @@ np.mean(np.abs(preds - Y_data))
 
 ## PROCESSING
 
-
-def prep_df(ar_538, lag_order):
+def prep_model_df(ar_538, lag_order, shift = True):
     df = ar_538[['y', f'lag{lag_order}']]
     df = df.iloc[::-1].reset_index(drop = True)
-    df['avg_30'] = (df['y'].rolling(window = 30).mean()).shift((lag_order))
-    df['avg_90'] = (df['y'].rolling(window = 90).mean()).shift((lag_order))
-    df['avg_lifetime'] = (np.cumsum(df['y'])/(df.index + 1)).shift(lag_order)
+    if shift:
+        df['avg_30'] = (df['y'].rolling(window = 30).mean()).shift((lag_order))
+        df['avg_90'] = (df['y'].rolling(window = 90).mean()).shift((lag_order))
+        df['avg_lifetime'] = (np.cumsum(df['y'])/(df.index + 1)).shift(lag_order)
+    else:
+        df['avg_30'] = (df['y'].rolling(window = 30).mean())
+        df['avg_90'] = (df['y'].rolling(window = 90).mean())
+        df['avg_lifetime'] = (np.cumsum(df['y'])/(df.index + 1))
+
     df = df.dropna().reset_index(drop = True)
     return(df)
+
+prep_df(ar_538, lag_order = 4, shift = False)
+
+## WORKING ON MODEL PREDICTIONS HERE
+ar_538
+cost_df = predictIt(predictit_df).gen_538_cost_df()
+most_recent_ar = ar_538['y'][0]
+model_st_devs = pd.read_csv('model_errors_std.csv')
+model_st_devs
+
+df = ar_538
+df['lag1'] = df['y'].shift(-1)
+df['lag2'] = df['y'].shift(-2)
+df['lag3'] = df['y'].shift(-3)
+df['lag4'] = df['y'].shift(-4)
+df['lag5'] = df['y'].shift(-5)
+df['lag6'] = df['y'].shift(-6)
+df['lag7'] = df['y'].shift(-7)
+
+ar_data = ar_538
+
+approval_538(ar_538).st_devs
+
+## CHANGE THIS TO PREP DF CLASS
+
+end_date = cost_df['dateEnd'].unique()
+end_date = pd.to_datetime(end_date[0]).date()
+current_date = ar_data['ds'].iloc[0].date()
+
+days_off = end_date - current_date
+datediff_index = days_off.days - 1
+
+if datediff_index < 0:
+    raise ValueError("""It is the day of the market close so don't use the model""")
+
+## OR MAKE AN ARGUMENT HERE - STDEVS IS THE ARGUMENT
+
+st_devs = model_st_devs
+sd_to_use = st_devs.iloc[datediff_index]
+
+### BUILD MODEL HERE
+for_model = pd.read_csv('best_model.csv')
+
+lag_order = for_model['lag'].iloc[datediff_index]
+
+train_df = prep_df(self.df, lag_order = lag_order)
+
+test_df = prep_df(self.df, lag_order = for_model['lag'].iloc[datediff_index], shift = False)
+test_df = test_df.iloc[-1:]
+test_df[f'lag{lag_order}'] = most_recent_ar
+
+def fit_model(train_df, test_df, other_features, model_type):
+    X_train = train_df.drop(['y'] + other_features, axis = 1)
+    X_test = test_df.drop(['y'] + other_features, axis = 1)
+    Y_train = train_df['y']
+
+    ## the model
+    if model_type == 'lm':
+        model = LinearRegression(fit_intercept=False)
+    elif model_type == 'rf':
+        model = RandomForestRegressor()
+    model.fit(X_train, Y_train)
+    preds = model.predict(X_test)
+    return(preds)
+
+estimate = fit_model(train_df, 
+            test_df, 
+            other_features = [for_model['additional_features'].iloc[datediff_index]],
+            model_type = for_model['model'].iloc[datediff_index])
+## CONSIDER ADDING ON THE BIAS HERE
+
+
+## PUT RESULT AS MOST_RECENT_AR HERE
+
+
+dist = scipy.stats.norm(estimate + .077, sd_to_use)
+
+cost_df['actual_lower'] = cost_df['lower'] - .05
+cost_df['actual_upper'] = cost_df['upper'] + .05
+
+cost_df['prob'] = cdf_probs(dist, lower = cost_df['actual_lower'], upper = cost_df['actual_upper'])
+
+#cost_df['prob'].apply(lambda x: round(x, 4))
+
+cd = cost_df.drop(['actual_lower', 'actual_upper', 'dateEnd'], axis = 1)
+cd['yes_margin'] = cd['prob'] - cd['real_yes_cost']
+cd['no_margin'] = (1-cd['prob']) - cd['real_no_cost']
+cd['prob'] = round(cd['prob'], 4)
+cd = cd[['lower', 'upper', 'prob', 'bestBuyYesCost', 'bestBuyNoCost', 'yes_margin', 'no_margin']]
+
+hours_since_update = round((datetime.datetime.now() - pd.to_datetime(ar_data['timestamp'][0])).seconds / (60*60), 1)
+
+print(str(days_off.days) + ' days out, current rating is ' + str(round(most_recent_ar, 2)) + ', last update posted ' + str(hours_since_update) + ' hours ago at '+ ar_data['timestamp'][0])
+
+return(cd)
+
+raw_df = pd.read_csv('errors_raw.csv')
+fordist = estimate - raw_df.groupby('lag').mean().iloc[datediff_index]
+    
+
+## 
+predictIt(predictit_df).gen_538_cost_df()
 
 df_for_model = prep_df(ar_538, lag_order = 1)
 
@@ -69,7 +175,7 @@ def find_best_model(ar_538):
         for features in [['avg_lifetime', 'avg_30', 'avg_90'], ['avg_30', 'avg_90'], ['avg_30', 'avg_lifetime'], ['avg_90', 'avg_lifetime'], ['avg_30'], ['avg_90'], ['avg_lifetime']]:
             for model in ['lm', 'rf']:
 
-                z = test_model_errors(ar_538 = ar_538, lag_order = lag, other_features=features, model_type=model)
+                z = test_model_errors(df = prep_df(ar_538, lag_order = lag), lag_order = lag, other_features=features, model_type=model)
 
                 toappend = pd.DataFrame({'lag': lag,
                 'additional_features':features,
@@ -87,7 +193,20 @@ def find_best_model(ar_538):
     answer = final_df.groupby(['lag']).first()
 
     for_model = answer.reset_index()[['lag', 'additional_features', 'model']]
+
+    for_model.to_csv('best_model.csv', index = False)
     return(for_model)
+
+for_model = find_best_model(ar_538)
+
+## to do: make predictions, test them for sanity, 
+# get sd for ranges of predictions, look to make sure they are normal
+# do a 1x calculation for a set of ranges
+# add to other function
+for_model
+##
+2+2
+
 
 def gen_model_stds(ar_538, for_model, n_back = 500):
     ans = []
@@ -125,12 +244,14 @@ def gen_model_stds(ar_538, for_model, n_back = 500):
             ans.append(next_performance)
             l.append(lag)
 
-    test_df.to_csv('errors_raw.csv')
+            print(f'Lag {str(lag + 1)}, iter {str(i - min_index)} of {str(max_index - min_index)}')
 
-    test_df = pd.DataFrame({'lag':l + 1, 'error':ans})
+    test_df = pd.DataFrame({'lag':l, 'error':ans})
+    test_df['lag'] = test_df.lag + 1
     test_df['error'] = test_df['error'].astype(float)
     st_devs = test_df.groupby('lag')['error'].std()
-    st_devs.to_csv('errors_std.csv')
+    test_df.to_csv('errors_raw.csv', index = False)
+    st_devs.to_csv('model_errors_std.csv', index = False)
     return(test_df)
 
 ## to do: rf predictions w/ standard errors - put into arbitrage.py function. 
@@ -218,4 +339,28 @@ alt.Chart(test_df[test_df['lag'] == 2]).mark_line().encode(
 alt.Chart(test_df[test_df['lag'] == 2]).mark_bar().encode(
     alt.X('error', bin = True),
     y = 'count()'
+)
+
+t = rf_raw
+t['iter'] = t.index - (700 * (t.lag - 1))
+t['lag'] = t['lag'].astype(str)
+t['abs_error'] = np.abs(t.error)
+t['ma_10'] = t['abs_error'].rolling(window = 30).mean()
+
+alt.Chart(t).mark_line().encode(
+    x = 'iter',
+    y = 'ma_10',
+    color = 'lag')
+
+alt.Chart(ar_538).mark_line().encode(
+    x = 'ds',
+    y = 'y')
+
+
+raw_df = pd.read_csv('errors_raw.csv')
+
+alt.Chart(raw_df).mark_bar().encode(
+    alt.X('error:Q', bin=True),
+    alt.Y('count()'),
+    facet='lag'
 )
