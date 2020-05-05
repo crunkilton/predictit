@@ -1,8 +1,17 @@
 
 ## ideas 4/3/2020:
-## 1) betfair arbitrage
-## 2) comment out everything so I'll understand it
-## other stuff: make 538 AR predictions better, do tweet count model. 
+## 1a) Arbitrage: external sources
+# ---- betfair arbitrage
+# ---- 538 vs PI differences once their models go up
+## 1b) Modeling: more series
+# ---- add sell until if anyone gets really into this
+# ---- biden vs trump RCP
+# ---- tweets (set up data collection script at least)
+## 2) comment out everything so I'll understand it in the future
+## 3) buy a VM and have it send emails daily
+# ---- arbitrage
+# ---- 538 approval rating
+
 
 ########## THE FILE ##########
 
@@ -12,7 +21,9 @@ import requests
 import json
 import datetime
 import scipy.stats
-
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+import altair as alt
 
 class odds_calc():
     def __init__(self, odds, withdrawal_tax = False):
@@ -35,6 +46,10 @@ class odds_calc():
         real_odds = self.odds/new_total
 
         return(real_odds)
+    
+    def inv_real_odds(self):
+        inverse_real_odds = (self.odds * .9)/(1 - self.odds * .1)
+        return(inverse_real_odds)
     
     def ror_arbitrage(self):
         cost = np.sum(self.odds)
@@ -212,21 +227,6 @@ class predictIt():
 
 predictIt(predictit_df).arbitrage_roi()
 
-
-def list_contests(df):
-    uqs = df.groupby(['contract_name', 'contract_id']).size().reset_index().rename(columns={0:'count'})
-
-    uqs = uqs.sort_values(by = ['contract_name'])
-
-    for row in range(len(uqs)):
-        print(uqs['contract_id'][row], uqs['contract_name'][row])
-
-# list_contests(df[df['contract_name'].str.contains("Trump's 538 job")])
-#4353
-#4365
-#4366
-
-
 ######## TRUMP 538 APPROVAL RATING HERE ##########
 ## calculate averages historically:
 
@@ -271,7 +271,37 @@ class approval_538():
         prob = dist.cdf(upper) - dist.cdf(lower)
         return(prob)
     
-    def cost_probs(self):
+    @staticmethod
+    def fit_model(train_df, test_df, other_features, model_type):
+        X_train = train_df.drop(['y'] + other_features, axis = 1)
+        X_test = test_df.drop(['y'] + other_features, axis = 1)
+        Y_train = train_df['y']
+
+        ## the model
+        if model_type == 'lm':
+            model = LinearRegression(fit_intercept=False)
+        elif model_type == 'rf':
+            model = RandomForestRegressor()
+        model.fit(X_train, Y_train)
+        preds = model.predict(X_test)
+        return(preds)
+
+    def prep_model_df(self, lag_order, shift = True):
+        df = self.df[['y', f'lag{lag_order}']]
+        df = df.iloc[::-1].reset_index(drop = True)
+        if shift:
+            df['avg_30'] = (df['y'].rolling(window = 30).mean()).shift((lag_order))
+            df['avg_90'] = (df['y'].rolling(window = 90).mean()).shift((lag_order))
+            df['avg_lifetime'] = (np.cumsum(df['y'])/(df.index + 1)).shift(lag_order)
+        else:
+            df['avg_30'] = (df['y'].rolling(window = 30).mean())
+            df['avg_90'] = (df['y'].rolling(window = 90).mean())
+            df['avg_lifetime'] = (np.cumsum(df['y'])/(df.index + 1))
+
+        df = df.dropna().reset_index(drop = True)
+        return(df)
+    
+    def cost_probs(self, method = 'average', buy_margin = .05):
         ar_data = self.df
         st_devs = self.st_devs
         cost_df = predictIt(predictit_df).gen_538_cost_df()
@@ -286,23 +316,53 @@ class approval_538():
 
         if datediff_index < 0:
             raise ValueError("""It is the day of the market close so don't use the model""")
-
-        sd_to_use = st_devs.iloc[datediff_index]
         
-        dist = scipy.stats.norm(most_recent_ar, sd_to_use)
+        if method == 'model':
+            sd_to_use = pd.read_csv('model_errors_std.csv').iloc[datediff_index]
+            for_model = pd.read_csv('best_model.csv')
+            lag_order = for_model['lag'].iloc[datediff_index]
 
+            train_df = self.prep_model_df(lag_order = lag_order)
+            test_df = self.prep_model_df(lag_order = for_model['lag'].iloc[datediff_index], shift = False)
+            test_df = test_df.iloc[-1:]
+            test_df[f'lag{lag_order}'] = most_recent_ar
+
+            estimate = self.fit_model(train_df, 
+                        test_df, 
+                        other_features = [for_model['additional_features'].iloc[datediff_index]],
+                        model_type = for_model['model'].iloc[datediff_index])
+            
+            raw_errors_df = pd.read_csv('errors_raw.csv')
+            fordist = estimate - raw_errors_df.groupby('lag').mean().iloc[datediff_index]
+            dist = scipy.stats.norm(fordist, sd_to_use)
+
+        else:            
+            sd_to_use = st_devs.iloc[datediff_index]
+            dist = scipy.stats.norm(most_recent_ar, sd_to_use)
+
+        ## because predictit rounds
         cost_df['actual_lower'] = cost_df['lower'] - .05
         cost_df['actual_upper'] = cost_df['upper'] + .05
 
+        ## adding the chance each range happens
         cost_df['prob'] = self.cdf_probs(dist, lower = cost_df['actual_lower'], upper = cost_df['actual_upper'])
 
-        #cost_df['prob'].apply(lambda x: round(x, 4))
-
+        ## tidying
         cd = cost_df.drop(['actual_lower', 'actual_upper', 'dateEnd'], axis = 1)
         cd['yes_margin'] = cd['prob'] - cd['real_yes_cost']
         cd['no_margin'] = (1-cd['prob']) - cd['real_no_cost']
+
+        ## set the value we should buy yes/no to if we buy to where we have a 5 cent margin and making cases where it is less than .05 (the buy margin) nan
+        cd['buy_yes_to'] = np.floor(100 * odds_calc(cd['prob'] - buy_margin).inv_real_odds())/100
+        cd['buy_no_to'] = np.ceil(100 * odds_calc(1-cd['prob'] - buy_margin).inv_real_odds())/100
+        cd['buy_yes_to'] = cd['buy_yes_to'].where(cd['yes_margin'] >= .05)
+        cd['buy_no_to'] = cd['buy_no_to'].where(cd['no_margin'] >= .05)
+
+        ## rounding so the df is readable
         cd['prob'] = round(cd['prob'], 4)
-        cd = cd[['lower', 'upper', 'prob', 'bestBuyYesCost', 'bestBuyNoCost', 'yes_margin', 'no_margin']]
+
+        ## keeping the columns I want
+        cd = cd[['lower', 'upper', 'prob', 'bestBuyYesCost', 'bestBuyNoCost', 'yes_margin', 'no_margin', 'buy_yes_to', 'buy_no_to']]
 
         hours_since_update = round((datetime.datetime.now() - pd.to_datetime(ar_data['timestamp'][0])).seconds / (60*60), 1)
 
@@ -418,6 +478,56 @@ class approval_538():
         ## return
         return(cd)
 
+def merge_preds(format = 'wide'):
+    model_preds = approval_538(ar_538).cost_probs(method = 'model')
+    avg_preds = approval_538(ar_538).cost_probs(method = 'avg')
+
+    if format == 'wide':
+        both_preds = pd.merge(model_preds, avg_preds, left_on = ['lower', 'upper', 'bestBuyYesCost', 'bestBuyNoCost'], right_on = ['lower', 'upper', 'bestBuyYesCost', 'bestBuyNoCost'], suffixes=['_model', '_avg'])
+
+        both_preds = both_preds[['lower', 'upper', 'bestBuyYesCost', 'bestBuyNoCost', 'prob_model', 'prob_avg',
+            'yes_margin_model', 
+            'yes_margin_avg','no_margin_model',  
+            'no_margin_avg', 
+            'buy_yes_to_model', 'buy_no_to_model',
+            'buy_yes_to_avg', 'buy_no_to_avg']]
+    if format == 'long':
+        
+        model_preds['method'] = 'model'
+        avg_preds['method'] = 'avg'
+
+        both_preds = model_preds.append(avg_preds)
+
+        both_preds = both_preds.melt(id_vars = ['lower', 'upper', 'bestBuyYesCost','bestBuyNoCost', 'method'], value_vars = ['yes_margin', 'no_margin'], var_name = 'value_type', value_name = 'margin')
+
+    return(both_preds)
+
+## looking at results
+merge_preds(format = 'wide')
+
+## a plot
+p = merge_preds(format = 'long')
+p['range'] = p['lower'].astype(str).str.cat(p['upper'].astype(str), sep = '-')
+
+## altair version
+alt.Chart(p[p['margin'] > 0]).mark_bar().encode(
+    x = 'range',
+    y = 'margin',
+    color = 'value_type',
+    facet = 'method'
+)
+
+## ggplot version because altair can't do dodged bar charts
+## for comparing avg vs model predictions
+from plotnine import ggplot, geom_col, aes, facet_wrap, theme, element_text
+(ggplot(p, aes('range', 'margin', fill='method')) +
+    geom_col(position = 'dodge')  +
+    facet_wrap('~value_type') +
+    theme(axis_text_x=element_text(rotation=90, hjust=.5))
+)
+
+## altair can't do dodged bar charts
+
 # approval_538(ar_538).cost_probs()
 
 # approval_538(ar_538).max_ar_probs(method = 'simulation')
@@ -480,6 +590,19 @@ def hurst(ts, lags):
 ## the problem: I don't think trump's approval follows a random walk over the long term - I expect it is pulled back and oscillates around a mean. 
 
 
+def list_contests(df):
+    uqs = df.groupby(['contract_name', 'contract_id']).size().reset_index().rename(columns={0:'count'})
+
+    uqs = uqs.sort_values(by = ['contract_name'])
+
+    for row in range(len(uqs)):
+        print(uqs['contract_id'][row], uqs['contract_name'][row])
+
+# list_contests(df[df['contract_name'].str.contains("Trump's 538 job")])
+#4353
+#4365
+#4366
+
 
 
 paired_outcomes = {'ia_nh_pair':[14214, 19366],
@@ -496,7 +619,7 @@ paired_outcomes = {'ia_nh_pair':[14214, 19366],
                     'tx_biden_nom':[18065, 7729],
                     'tx_biden_pres':[18037, 7940],
 }
-
+paired_outcomes
 # predictIt(predictit_df).paired_outcome_arbitrage(paired_outcomes)
 
 
