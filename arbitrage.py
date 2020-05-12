@@ -1,5 +1,7 @@
 
 ## ideas 4/3/2020:
+## 0) Improvemetns
+# ---- boostrap the simple model predictions? probably won't change anything, but won't hurt. 
 ## 1a) Arbitrage: external sources
 # ---- betfair arbitrage
 # ---- 538 vs PI differences once their models go up
@@ -224,7 +226,6 @@ class predictIt():
 
         return(cost_df)
 
-
 predictIt(predictit_df).arbitrage_roi()
 
 ######## TRUMP 538 APPROVAL RATING HERE ##########
@@ -240,8 +241,6 @@ def pull_538_approval():
     return(ar_data)
 
 ar_538 = pull_538_approval()
-
-
 
 class approval_538():
 
