@@ -73,7 +73,7 @@ class odds_calc():
         return(ror)
 
 # ## examples
-# odds_calc(odds = .93, withdrawal_tax=True).real_odds()
+# odds_calc(odds = .85, withdrawal_tax=True).real_odds()
 # odds_calc(odds = [.42, .50, .97], withdrawal_tax=False).ror_arbitrage()
 
 ### API HERE
